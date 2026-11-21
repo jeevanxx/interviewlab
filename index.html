@@ -321,9 +321,9 @@
   // ---------- Gemini ----------
   async function findModels(key) {
     try {
-      var res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {
+      var res = await fetchWithTimeout("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {
         headers: { "x-goog-api-key": key }
-      });
+      }, 15000);
       var data = await res.json();
       return (data.models || [])
         .filter(function (m) {
@@ -336,29 +336,41 @@
     } catch (e) { return []; }
   }
 
+  var statusBtn = null; // button that shows live progress
+
+  async function fetchWithTimeout(url, opts, ms) {
+    var ctrl = new AbortController();
+    var t = setTimeout(function () { ctrl.abort(); }, ms);
+    try { return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal })); }
+    catch (e) { throw new Error(e.name === "AbortError" ? "timed out after " + (ms / 1000) + "s" : e.message); }
+    finally { clearTimeout(t); }
+  }
+
   async function askGemini(prompt) {
     var key = $("apikey").value.trim();
     if (!key) throw new Error("Please paste your Gemini API key first.");
-    var candidates = MODELS.slice(), errors = [], discovered = false;
-    for (var i = 0; i < candidates.length; i++) {
+    var candidates = MODELS.slice(), errors = [], discovered = false, MAX_TRIES = 6;
+    for (var i = 0; i < candidates.length && i < MAX_TRIES; i++) {
+      if (statusBtn) statusBtn.innerHTML = '<span class="spinner"></span>Asking ' + escapeHtml(candidates[i]) + "...";
       try {
-        var res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + candidates[i] + ":generateContent", {
+        var res = await fetchWithTimeout("https://generativelanguage.googleapis.com/v1beta/models/" + candidates[i] + ":generateContent", {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": key },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: { responseMimeType: "application/json" }
           })
-        });
+        }, 45000);
         var data = await res.json();
-        if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
-        var text = data.candidates[0].content.parts[0].text.trim()
+        if (!res.ok) throw new Error((data.error && data.error.message) || ("HTTP " + res.status));
+        var text = data.candidates[0].content.parts.map(function (p) { return p.text || ""; }).join("").trim()
           .replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
         var parsed = JSON.parse(text);
         if (!Array.isArray(parsed)) throw new Error("Unexpected response format");
         return parsed;
       } catch (err) {
         errors.push(candidates[i] + ": " + err.message);
+        if (/API key not valid|API_KEY_INVALID|PERMISSION_DENIED/i.test(err.message)) break; // no point trying other models
         if (i === candidates.length - 1 && !discovered) {
           discovered = true;
           (await findModels(key)).forEach(function (m) { if (candidates.indexOf(m) === -1) candidates.push(m); });
@@ -390,6 +402,7 @@
 
     var btn = $("genBtn");
     busy(btn, true, "Preparing questions...");
+    statusBtn = btn;
     try {
       var prompt = "You are an interviewer. Create exactly 5 interview questions for a " + state.level + " " + role +
         ". Include a mix of technical and HR questions. Return ONLY a JSON array of 5 strings.";
@@ -451,6 +464,7 @@
     showError("error2", "");
     var btn = $("nextBtn");
     busy(btn, true, "Evaluating answers...");
+    statusBtn = btn;
     try {
       var qa = "";
       state.questions.forEach(function (q, i) {
