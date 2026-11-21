@@ -286,7 +286,7 @@
 
 <script>
   // ---------- State ----------
-  var MODELS = ["gemini-flash-latest", "gemini-2.5-flash"]; // tried first; more are discovered automatically
+  var MODELS = ["gemini-flash-lite-latest", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]; // fastest first; more are discovered automatically
   var state = { role: "", level: "Fresher", questions: [], answers: [], current: 0 };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -328,11 +328,12 @@
       return (data.models || [])
         .filter(function (m) {
           var n = m.name.toLowerCase();
-          return n.indexOf("flash") !== -1 && !/lite|image|tts|live|audio|embed|thinking|vision/.test(n) &&
+          return n.indexOf("flash") !== -1 && !/image|tts|live|audio|embed|thinking|vision|preview|exp/.test(n) &&
             (m.supportedGenerationMethods || []).indexOf("generateContent") !== -1;
         })
         .map(function (m) { return m.name.replace("models/", ""); })
-        .reverse();
+        .reverse()
+        .sort(function (a, b) { return (b.indexOf("lite") !== -1) - (a.indexOf("lite") !== -1); });
     } catch (e) { return []; }
   }
 
@@ -353,15 +354,21 @@
     for (var i = 0; i < candidates.length && i < MAX_TRIES; i++) {
       if (statusBtn) statusBtn.innerHTML = '<span class="spinner"></span>Asking ' + escapeHtml(candidates[i]) + "...";
       try {
-        var res = await fetchWithTimeout("https://generativelanguage.googleapis.com/v1beta/models/" + candidates[i] + ":generateContent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: "application/json" }
-          })
-        }, 45000);
+        var call = function (noThinking) {
+          var cfg = { responseMimeType: "application/json", temperature: 0.7 };
+          if (noThinking) cfg.thinkingConfig = { thinkingBudget: 0 }; // skip the slow "thinking" step
+          return fetchWithTimeout("https://generativelanguage.googleapis.com/v1beta/models/" + candidates[i] + ":generateContent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: cfg })
+          }, 45000);
+        };
+        var res = await call(true);
         var data = await res.json();
+        if (!res.ok && /thinking/i.test((data.error && data.error.message) || "")) {
+          res = await call(false); // this model doesn't allow turning thinking off
+          data = await res.json();
+        }
         if (!res.ok) throw new Error((data.error && data.error.message) || ("HTTP " + res.status));
         var text = data.candidates[0].content.parts.map(function (p) { return p.text || ""; }).join("").trim()
           .replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
@@ -473,7 +480,8 @@
       var prompt = "You are an interviewer for a " + state.level + " " + state.role + " position. Evaluate each answer below. " +
         "If an answer is '(no answer given)', give it a score of 0. " +
         'Return ONLY a JSON array with one object per question, in the same order, with keys: "question", "score" (number 0-10), ' +
-        '"good" (what was good), "missing" (what was missing), "sample_answer" (a better sample answer).\n\n' + qa;
+        '"good" (what was good), "missing" (what was missing), "sample_answer" (a better sample answer). ' +
+        'Be concise: "good" and "missing" max 2 sentences each, "sample_answer" max 80 words.\n\n' + qa;
       var items = await askGemini(prompt);
       renderReport(items);
       setStep(3);
